@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY deps/requirements-ton.txt .
+RUN pip install --no-cache-dir -r requirements-ton.txt
+
+COPY ton-bot/ ./ton-bot/
+
+WORKDIR /app/ton-bot
+CMD ["python", "main.py"]

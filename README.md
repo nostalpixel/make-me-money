@@ -153,3 +153,44 @@ python bot/backtest.py
 | 2026-05-10 | $20.00 | Bot deployed |
 
 *This table is updated as the experiment progresses.*
+
+---
+
+## TON Bot
+
+A second bot running in parallel, trading **TON/USDT on DeDust DEX** (on-chain, no CEX).
+
+| Parameter | Value |
+|-----------|-------|
+| Pair | TON/USDT spot |
+| DEX | DeDust v2 (TON mainnet) |
+| Timeframe | 30-minute candles (GeckoTerminal) |
+| Signal | RSI(14) + MACD histogram |
+| SELL trigger | RSI > 65 + MACD bearish → swap TON → USDT |
+| BUY trigger | RSI < 45 + MACD bullish → swap USDT → TON |
+| Gas reserve | 1 TON always kept in wallet |
+| Poll interval | every 30 minutes |
+
+```
+ton-bot/
+├── main.py       # Telegram bot, commands, job scheduler
+├── strategy.py   # RSI+MACD using GeckoTerminal OHLCV
+├── executor.py   # TON wallet (pytoniq) + DeDust swaps
+├── reporter.py   # Telegram message formatting
+└── db.py         # SQLite trade log
+```
+
+### Extra env vars needed
+
+```env
+TON_MNEMONIC=word1 word2 ... word24   # 24-word TON wallet mnemonic
+```
+
+### TON Telegram commands
+
+| Command | Description |
+|---------|-------------|
+| `/tonstatus` | TON + USDT balances, portfolio value, P&L |
+| `/tonlog` | Last 10 TON trades |
+| `/tonpause` | Pause TON trading |
+| `/tonresume` | Resume TON trading |
