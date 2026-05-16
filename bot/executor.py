@@ -96,7 +96,11 @@ async def reconcile(exchange: ccxt.bybit) -> None:
     """
     position = db.get_open_position()
     btc = await get_btc_balance(exchange)
-    has_btc = btc * 50000 > MIN_ORDER  # rough notional check
+    ticker = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+    btc_price = float(ticker["last"])
+    # Use 50% of MIN_ORDER as dust threshold — avoids false mismatch from
+    # price movement slightly reducing notional below the trade minimum
+    has_btc = btc * btc_price > MIN_ORDER * 0.5
 
     if position and not has_btc:
         logger.error("MISMATCH: DB shows open position but no BTC on exchange")
