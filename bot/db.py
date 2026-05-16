@@ -7,6 +7,8 @@ DB_PATH = "trade.db"
 
 def init(path: str = DB_PATH) -> None:
     with sqlite3.connect(path) as con:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
         con.executescript("""
             CREATE TABLE IF NOT EXISTS trades (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,

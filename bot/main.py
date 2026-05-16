@@ -95,9 +95,6 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
 
     try:
-        if context.bot_data.get("paused"):
-            return
-
         exchange = make_exchange()
         position = db.get_open_position()
 
@@ -145,6 +142,10 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
         if signal != "BUY":
             return
 
+        if context.bot_data.get("paused"):
+            logger.info("Paused — skipping BUY entry")
+            return
+
         if portfolio < executor.MIN_ORDER * 2:
             await alert(f"⚠️ Balance below minimum (${portfolio:.2f}). Halting trades.")
             context.bot_data["paused"] = True
@@ -177,6 +178,30 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
         await alert(f"⚠️ Error in polling cycle: {e}. Skipping.")
 
 
+# ── Heartbeat job ─────────────────────────────────────────────────────────────
+
+async def heartbeat(context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = os.environ["TELEGRAM_ALLOWED_CHAT_ID"]
+    try:
+        exchange  = make_exchange()
+        portfolio = await executor.get_total_portfolio(exchange)
+        position  = db.get_open_position()
+        paused    = "⏸ paused" if context.bot_data.get("paused") else "▶️ trading"
+        if position:
+            ticker   = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+            price    = float(ticker["last"])
+            pnl_pct  = (price - position["entry_price"]) / position["entry_price"] * 100
+            pos_str  = f"holding BTC @ ${position['entry_price']:,.0f} ({pnl_pct:+.1f}%)"
+        else:
+            pos_str = "no open position"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"💓 Alive | ${portfolio:.2f} | {pos_str} | {paused}",
+        )
+    except Exception as e:
+        logger.error("Heartbeat error: %s", e)
+
+
 # ── Daily summary job ─────────────────────────────────────────────────────────
 
 async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -195,6 +220,17 @@ async def on_startup(app: Application) -> None:
     chat_id  = os.environ["TELEGRAM_ALLOWED_CHAT_ID"]
     exchange = make_exchange()
     testnet  = os.environ.get("BYBIT_TESTNET", "true").lower() == "true"
+
+    # Clock sync check — alert if local clock is >10s behind exchange
+    try:
+        server_ts = exchange.milliseconds()
+        local_ts  = int(__import__("time").time() * 1000)
+        drift_s   = abs(server_ts - local_ts) / 1000
+        if drift_s > 10:
+            await app.bot.send_message(chat_id=chat_id, text=f"⚠️ Clock drift {drift_s:.1f}s vs exchange. Check NTP.")
+            logger.warning("Clock drift: %.1fs", drift_s)
+    except Exception:
+        pass
 
     # Reconcile spot position on restart
     mismatch = await executor.reconcile(exchange)
@@ -268,6 +304,7 @@ def main() -> None:
     app.add_handler(CommandHandler("log",    cmd_log))
 
     app.job_queue.run_repeating(poll_market, interval=POLL_INTERVAL, first=10)
+    app.job_queue.run_repeating(heartbeat,   interval=21600, first=21600)  # every 6h
     app.job_queue.run_daily(daily_summary, time=__import__("datetime").time(DAILY_HOUR, DAILY_MIN))
 
     # Graceful shutdown on SIGTERM
