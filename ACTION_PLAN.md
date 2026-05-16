@@ -1,6 +1,6 @@
 # Action Plan
 
-> Machine-readable implementation roadmap. Last updated: 2026-05-17.
+> Machine-readable implementation roadmap. Last updated: 2026-05-17. Codex-reviewed.
 > Source of truth for all development priorities.
 > Reference: proposals/ directory for full detail on each item.
 
@@ -286,17 +286,112 @@ Build only after 3+ strategies are live and text commands become painful.
 
 ---
 
-## Current Blockers Summary
+## Phase 0.5 — Operational Reliability (Codex-flagged gaps, added 2026-05-17)
 
-Before bot is safe with $100 for 3 months, these must be done (in order):
+These were missing from the original plan. All required for unattended 3-month operation.
 
-1. **0.1** Fix exit bug (sells all BTC)
-2. **0.2** Persist paused state to DB
-3. **0.3** Use closed candles for signal
-4. **0.4** Use exchange lot size metadata
-5. **1.1** Replace stop-loss with drawdown alerts
-6. **1.4** Exchange-native TP order after entry
-7. **1.5** Heartbeat alert
-8. **4.1** Move to VPS (Mac can't be relied on for 3 months)
+### 0.5.1 — Idempotent order lifecycle (crash recovery)
+**What:** If bot crashes between order sent and DB write, or between TP placed and DB updated,
+state diverges and bot can double-enter, fail to exit, or lose track of positions.
+**Fix:** Use a DB transaction that writes order intent BEFORE sending to exchange, then confirms
+on success. On startup reconciliation (0.5.2), repair any `pending_*` rows.
+States: `pending_entry` → `open` → `pending_exit` → `closed` | `error`
 
-Everything else improves performance or experience but is not a blocker for safe operation.
+### 0.5.2 — Startup reconciliation
+**What:** On every bot start, compare exchange open orders + BTC balance against DB.
+Repair any divergence before resuming normal operation.
+**Implementation:** Extend `executor.reconcile()` to:
+1. Check for any open exchange orders not in DB — close or record them
+2. Check for `pending_entry` rows in DB — verify if order filled or not
+3. Check for `pending_exit` rows — verify if TP order still live on exchange
+4. Alert on any mismatch, pause until manually reviewed if unrecoverable
+
+### 0.5.3 — Partial fill and dust handling
+**What:** Market orders can partially fill. Exit must handle case where BTC qty received ≠ expected.
+**Fix:** After fill, record actual `btc_qty` from `order['filled']` (not computed). On exit,
+sell exactly `position['btc_qty']`. If sell partially fills, retry remainder up to 3 times.
+Guard: if remaining BTC notional < $1, treat as dust and skip.
+
+### 0.5.4 — API fault policy (retry + circuit breaker)
+**What:** Current code catches generic exceptions and sends "skipping" alerts but has no
+structured retry or escalation. Silent loops hide exchange outages.
+**Fix:**
+- Wrap all exchange calls with retry: 3 attempts, exponential backoff (5s, 15s, 45s)
+- After 3 failures: pause bot, send "exchange unreachable" alert, stop retrying
+- On poll_market exception: distinguish transient (network) vs permanent (auth, balance) errors
+- Log full traceback for permanent errors
+
+### 0.5.5 — Clock sync and UTC day boundary
+**What:** VPS clock drift breaks candle boundary logic and daily P&L resets.
+**Fix:**
+- Add NTP check on startup: if system clock vs exchange time > 5s, alert and halt
+- Use UTC-based day boundaries for `daily_pnl` queries (already done via `date.today()` — verify TZ)
+- In Docker: set `TZ=UTC` in docker-compose.yml
+
+### 0.5.6 — SQLite durability
+**What:** Default SQLite settings can lose recent writes on power loss or Docker force-kill.
+**Fix:** Add to `db.init()`:
+```python
+con.execute("PRAGMA journal_mode=WAL")
+con.execute("PRAGMA synchronous=NORMAL")
+```
+Confirm `trade.db` volume mount path in docker-compose is correct (already done, verify).
+
+### 0.5.7 — Bybit API key hardening (BLOCKER)
+**What:** Current API key must be verified to have no withdrawal permissions and should be
+IP-restricted to VPS IP before going to $100. A leaked key with withdrawal rights = total loss.
+**Action (human task, not code):**
+1. Bybit → API Management → edit key
+2. Enable: Read, Spot Trading ONLY
+3. Disable: Withdrawals, Futures, Options
+4. Set IP restriction to VPS IP once VPS is provisioned
+5. Rotate key if it was ever committed to git or shared (it was visible in session — rotate now)
+
+### 0.5.8 — Pause semantics: entries only, not protective jobs
+**What:** When paused, bot must still:
+- Check drawdown alerts on open position
+- Maintain/check exchange TP orders
+- Run heartbeat
+- Run startup reconciliation
+Only NEW entries should be blocked.
+**Fix:** Change guard from `if context.bot_data.get("paused"): return` at top of poll_market
+to a targeted check only around the BUY branch.
+
+### 0.5.9 — Emergency kill switch
+**What:** One command/env var that immediately stops all new orders and alerts.
+**Implementation:**
+- `/kill` Telegram command: sets `kill_switch=true` in DB, sends confirmation
+- On startup: if `kill_switch=true` in DB, start in paused mode, alert operator
+- Separate from `/pause` — kill switch survives restarts, requires explicit `/unkill` to clear
+
+### 0.5.10 — Secondary alert on Telegram failure
+**What:** If Telegram send fails (bot blocked, token expired, network), alerts are silently lost.
+**Fix:** Log all unsent alerts to DB table `alert_queue`. On next successful send, prepend
+"[missed alerts: N]" header. If Telegram unreachable for >1hr, write to local log file as fallback.
+
+---
+
+## Current Blockers Summary (updated after Codex review)
+
+Before bot is safe with $100 for 3 months, in priority order:
+
+1. **0.5.7** Rotate/harden Bybit API key (human task — do now)
+2. **0.1** Fix exit bug (sells all BTC not just trade BTC)
+3. **0.4** Use exchange lot size metadata for order precision
+4. **1.4** Exchange-native TP order after entry
+5. **0.5.2** Startup reconciliation
+6. **0.5.1** Idempotent order lifecycle
+7. **0.2** Persist paused state to DB
+8. **0.5.8** Fix pause to allow protective jobs to run
+9. **0.5.9** Emergency kill switch
+10. **0.5.4** API fault policy (retry + circuit breaker)
+11. **0.5** Fee-aware P&L
+12. **0.3** Closed candles for signal
+13. **1.1** Replace stop-loss with drawdown alerts
+14. **1.5** Heartbeat alert
+15. **0.5.5** Clock sync check on startup
+16. **0.5.6** SQLite WAL mode
+17. **4.1** Move to VPS
+
+**After all above:** 2-4 weeks paper/tiny-size live with forced restart and network failure drills.
+**Only then:** Deposit $100 and run for 3 months.
