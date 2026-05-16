@@ -50,7 +50,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if str(update.effective_chat.id) != os.environ["TELEGRAM_ALLOWED_CHAT_ID"]:
         return
     exchange = make_exchange()
-    portfolio = await executor.get_balance(exchange)
+    portfolio = await executor.get_total_portfolio(exchange)
     position  = db.get_open_position()
     await update.message.reply_text(reporter.status_card(portfolio, position))
 
@@ -106,7 +106,7 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
             trigger = await executor.check_sl_tp(exchange, position)
             if trigger:
                 result    = await executor.close_position(exchange, position, trigger)
-                portfolio = await executor.get_balance(exchange)
+                portfolio = await executor.get_total_portfolio(exchange)
                 await alert(reporter.close_card(trigger, result["exit_price"], result["pnl_usdt"], portfolio))
                 reporter.maybe_append_x_post("sold", result["exit_price"], result["pnl_usdt"], portfolio)
             else:
@@ -119,7 +119,7 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                     entry     = position["entry_price"]
                     pnl_pct   = (price - entry) / entry * 100
                     pnl_usdt  = (price - entry) / entry * position["size_usdt"]
-                    portfolio = await executor.get_balance(exchange)
+                    portfolio = await executor.get_total_portfolio(exchange)
                     sl_price  = entry * (1 + executor.SL_PCT)
                     tp_price  = entry * (1 + executor.TP_PCT)
                     await alert(
@@ -134,7 +134,7 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
         # ── No position: look for entry ───────────────────────────────────
         ohlcv     = await asyncio.to_thread(exchange.fetch_ohlcv, PAIR, TIMEFRAME, limit=CANDLES)
         signal, rsi, macd_hist, reason = get_signal(ohlcv)
-        portfolio = await executor.get_balance(exchange)
+        portfolio = await executor.get_total_portfolio(exchange)
 
         ticker    = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
         price     = float(ticker["last"])
@@ -156,7 +156,7 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         context.bot_data["hold_polls"] = 0
-        portfolio = await executor.get_balance(exchange)
+        portfolio = await executor.get_total_portfolio(exchange)
         await alert(reporter.trade_card("BUY", result["price"], result["size_usdt"], reason, portfolio))
 
     except ccxt.AuthenticationError:
@@ -183,7 +183,7 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = os.environ["TELEGRAM_ALLOWED_CHAT_ID"]
     try:
         exchange  = make_exchange()
-        portfolio = await executor.get_balance(exchange)
+        portfolio = await executor.get_total_portfolio(exchange)
         await context.bot.send_message(chat_id=chat_id, text=reporter.daily_summary_card(portfolio))
     except Exception as e:
         logger.error("Daily summary error: %s", e)
@@ -201,7 +201,7 @@ async def on_startup(app: Application) -> None:
     if mismatch:
         await app.bot.send_message(chat_id=chat_id, text=f"⚠️ Position mismatch on startup: {mismatch}. Check Bybit manually.")
 
-    portfolio = await executor.get_balance(exchange)
+    portfolio = await executor.get_total_portfolio(exchange)
     mode      = "TESTNET" if testnet else "LIVE"
     await app.bot.send_message(
         chat_id=chat_id,

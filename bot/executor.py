@@ -38,6 +38,18 @@ async def get_btc_balance(exchange: ccxt.bybit) -> float:
     return float(bal.get("BTC", {}).get("free", 0))
 
 
+async def get_total_portfolio(exchange: ccxt.bybit) -> float:
+    """Returns total portfolio value in USDT: free USDT + BTC notional."""
+    bal = await asyncio.to_thread(exchange.fetch_balance)
+    usdt = float(bal.get("USDT", {}).get("free", 0))
+    btc  = float(bal.get("BTC",  {}).get("free", 0))
+    if btc > 0:
+        ticker = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+        btc_price = float(ticker["last"])
+        return usdt + btc * btc_price
+    return usdt
+
+
 async def place_buy(exchange: ccxt.bybit) -> dict | None:
     """Buy BTC/USDT with 50% of available USDT. Returns order info or None."""
     usdt = await get_balance(exchange)
