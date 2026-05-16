@@ -47,11 +47,15 @@ async def place_buy(exchange: ccxt.bybit) -> dict | None:
         logger.warning("Balance too low to place order: %.2f USDT", usdt)
         return None
 
+    ticker = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+    btc_price = float(ticker["last"])
+    btc_amount = round(size / btc_price, 6)  # convert USDT budget to BTC qty
+
     order = await asyncio.to_thread(
-        exchange.create_market_buy_order, PAIR, None, {"quoteOrderQty": size}
+        exchange.create_market_buy_order, PAIR, btc_amount
     )
     ts = datetime.now(timezone.utc).isoformat()
-    price = float(order.get("average") or order.get("price") or 0)
+    price = float(order.get("average") or order.get("price") or btc_price)
     trade_id = db.open_trade(ts, PAIR, "buy", size, price)
     logger.info("BUY executed: %.2f USDT @ %.2f | trade_id=%d", size, price, trade_id)
     return {"trade_id": trade_id, "price": price, "size_usdt": size}
