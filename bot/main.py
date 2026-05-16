@@ -105,21 +105,46 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
         if position:
             trigger = await executor.check_sl_tp(exchange, position)
             if trigger:
-                result   = await executor.close_position(exchange, position, trigger)
+                result    = await executor.close_position(exchange, position, trigger)
                 portfolio = await executor.get_balance(exchange)
                 await alert(reporter.close_card(trigger, result["exit_price"], result["pnl_usdt"], portfolio))
                 reporter.maybe_append_x_post("sold", result["exit_price"], result["pnl_usdt"], portfolio)
+            else:
+                # Send hourly hold update (every 4 polls at 15-min interval)
+                polls = context.bot_data.get("hold_polls", 0) + 1
+                context.bot_data["hold_polls"] = polls
+                if polls % 4 == 0:
+                    ticker    = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+                    price     = float(ticker["last"])
+                    entry     = position["entry_price"]
+                    pnl_pct   = (price - entry) / entry * 100
+                    pnl_usdt  = (price - entry) / entry * position["size_usdt"]
+                    portfolio = await executor.get_balance(exchange)
+                    sl_price  = entry * (1 + executor.SL_PCT)
+                    tp_price  = entry * (1 + executor.TP_PCT)
+                    await alert(
+                        f"📍 HOLDING BTC/USDT\n"
+                        f"Entry: ${entry:,.2f} → Now: ${price:,.2f}\n"
+                        f"P&L: {pnl_pct:+.2f}% (${pnl_usdt:+.4f})\n"
+                        f"SL: ${sl_price:,.2f} | TP: ${tp_price:,.2f}\n"
+                        f"Portfolio: ${portfolio:.2f} USDT"
+                    )
             return
 
         # ── No position: look for entry ───────────────────────────────────
-        ohlcv  = await asyncio.to_thread(exchange.fetch_ohlcv, PAIR, TIMEFRAME, limit=CANDLES)
-        signal = get_signal(ohlcv)
-        logger.info("Signal: %s", signal)
+        ohlcv     = await asyncio.to_thread(exchange.fetch_ohlcv, PAIR, TIMEFRAME, limit=CANDLES)
+        signal, rsi, macd_hist, reason = get_signal(ohlcv)
+        portfolio = await executor.get_balance(exchange)
+
+        ticker    = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+        price     = float(ticker["last"])
+
+        logger.info("Signal: %s | RSI=%.1f MACD=%.4f | %s", signal, rsi, macd_hist, reason)
+        await alert(reporter.signal_card(signal, rsi, macd_hist, reason, price, portfolio))
 
         if signal != "BUY":
             return
 
-        portfolio = await executor.get_balance(exchange)
         if portfolio < executor.MIN_ORDER * 2:
             await alert(f"⚠️ Balance below minimum (${portfolio:.2f}). Halting trades.")
             context.bot_data["paused"] = True
@@ -130,8 +155,8 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
             await alert("⚠️ Order failed — balance too low.")
             return
 
+        context.bot_data["hold_polls"] = 0
         portfolio = await executor.get_balance(exchange)
-        reason    = f"RSI<45 + MACD bullish"
         await alert(reporter.trade_card("BUY", result["price"], result["size_usdt"], reason, portfolio))
 
     except ccxt.AuthenticationError:
