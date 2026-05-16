@@ -201,19 +201,49 @@ async def on_startup(app: Application) -> None:
     if mismatch:
         await app.bot.send_message(chat_id=chat_id, text=f"⚠️ Position mismatch on startup: {mismatch}. Check Bybit manually.")
 
-    portfolio = await executor.get_total_portfolio(exchange)
+    usdt_bal  = await executor.get_balance(exchange)
+    btc_bal   = await executor.get_btc_balance(exchange)
+    ticker    = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+    btc_price = float(ticker["last"])
+    btc_value = btc_bal * btc_price
+    portfolio = usdt_bal + btc_value
+    position  = db.get_open_position()
     mode      = "TESTNET" if testnet else "LIVE"
-    await app.bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"🤖 Bot online [{mode}]\n"
-            f"Strategy: RSI14+MACD on BTC/USDT 15m\n"
-            f"Portfolio: ${portfolio:.2f} USDT\n"
-            f"Goal: $40.00\n"
-            f"SL: -5% | TP: +8% | Poll: every 15 min\n"
-            f"Commands: /status /pause /resume /log"
-        ),
-    )
+
+    lines = [
+        f"🤖 Bot online [{mode}]",
+        f"BTC/USDT @ ${btc_price:,.2f}",
+        f"",
+        f"💰 Balance",
+        f"  USDT: ${usdt_bal:.4f}",
+        f"  BTC:  {btc_bal:.6f} (${btc_value:.4f})",
+        f"  Total: ${portfolio:.4f}",
+        f"",
+    ]
+
+    if position:
+        entry    = position["entry_price"]
+        pnl_pct  = (btc_price - entry) / entry * 100
+        pnl_usdt = (btc_price - entry) / entry * position["size_usdt"]
+        sl_price = entry * (1 + executor.SL_PCT)
+        tp_price = entry * (1 + executor.TP_PCT)
+        lines += [
+            f"📍 Open position",
+            f"  Entry: ${entry:,.2f} | Now: ${btc_price:,.2f}",
+            f"  P&L: {pnl_pct:+.2f}% (${pnl_usdt:+.4f})",
+            f"  SL: ${sl_price:,.2f} | TP: ${tp_price:,.2f}",
+            f"",
+        ]
+    else:
+        lines.append("📍 No open position")
+        lines.append("")
+
+    lines += [
+        f"⚙️ RSI14+MACD | 15m | SL -5% TP +8%",
+        f"Commands: /status /pause /resume /log",
+    ]
+
+    await app.bot.send_message(chat_id=chat_id, text="\n".join(lines))
 
 
 def main() -> None:
