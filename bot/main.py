@@ -83,6 +83,42 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def cmd_glossary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if str(update.effective_chat.id) != os.environ["TELEGRAM_ALLOWED_CHAT_ID"]:
+        return
+    await update.message.reply_text(
+        "📖 Glossary\n"
+        "\n"
+        "P&L — Profit & Loss. How much you made or lost on a trade.\n"
+        "  +$0.50 = you're up 50 cents\n"
+        "  -$0.50 = you're down 50 cents\n"
+        "\n"
+        "TP — Take Profit. The price where the bot automatically sells to lock in a gain.\n"
+        "  Currently set at +8% above entry price.\n"
+        "\n"
+        "SL — Stop Loss. The price where the bot would normally sell to cut a loss.\n"
+        "  This bot alerts instead of auto-selling — you decide when to exit.\n"
+        "  Currently alerts at -5%, -10%, -15%.\n"
+        "\n"
+        "Entry — The price you bought BTC at.\n"
+        "\n"
+        "Portfolio — Total value of everything: USDT cash + BTC you're holding.\n"
+        "\n"
+        "RSI — Relative Strength Index. Measures if BTC is overbought or oversold.\n"
+        "  Below 45 = possibly oversold (bot looks to buy)\n"
+        "  Above 65 = possibly overbought (bot stays out)\n"
+        "\n"
+        "MACD — Momentum indicator. Confirms the RSI signal.\n"
+        "  Positive histogram = upward momentum (supports buying)\n"
+        "  Negative histogram = downward momentum (supports waiting)\n"
+        "\n"
+        "Signal — Bot's decision each poll: BUY / HOLD / SELL.\n"
+        "  Bot only acts on BUY. HOLD = wait. SELL = not used (we hold BTC).\n"
+        "\n"
+        "Commands: /status /log /pause /resume /glossary"
+    )
+
+
 # ── Polling job ───────────────────────────────────────────────────────────────
 
 async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -121,10 +157,12 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                     tp_price  = entry * (1 + executor.TP_PCT)
                     await alert(
                         f"📍 HOLDING BTC/USDT\n"
-                        f"Entry: ${entry:,.2f} → Now: ${price:,.2f}\n"
-                        f"P&L: {pnl_pct:+.2f}% (${pnl_usdt:+.4f})\n"
-                        f"SL: ${sl_price:,.2f} | TP: ${tp_price:,.2f}\n"
-                        f"Portfolio: ${portfolio:.2f} USDT"
+                        f"Bought at: ${entry:,.2f} | Now: ${price:,.2f}\n"
+                        f"Profit/Loss: {pnl_pct:+.2f}% (${pnl_usdt:+.4f})\n"
+                        f"Auto-sell target (TP): ${tp_price:,.2f} (+8%)\n"
+                        f"Alert threshold: ${sl_price:,.2f} (-5%)\n"
+                        f"Total portfolio: ${portfolio:.2f}\n"
+                        f"Type /glossary to explain terms"
                     )
             return
 
@@ -221,6 +259,16 @@ async def on_startup(app: Application) -> None:
     exchange = make_exchange()
     testnet  = os.environ.get("BYBIT_TESTNET", "true").lower() == "true"
 
+    # Register Telegram command menu (shows in "/" popup)
+    from telegram import BotCommand
+    await app.bot.set_my_commands([
+        BotCommand("status",   "Portfolio balance and open position"),
+        BotCommand("log",      "Last 10 trades"),
+        BotCommand("pause",    "Pause new entries"),
+        BotCommand("resume",   "Resume trading"),
+        BotCommand("glossary", "Explain P&L, TP, SL and other terms"),
+    ])
+
     # Clock sync check — alert if local clock is >10s behind exchange
     try:
         server_ts = exchange.milliseconds()
@@ -298,10 +346,11 @@ def main() -> None:
     )
     app.bot_data["paused"] = False
 
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("pause",  cmd_pause))
-    app.add_handler(CommandHandler("resume", cmd_resume))
-    app.add_handler(CommandHandler("log",    cmd_log))
+    app.add_handler(CommandHandler("status",   cmd_status))
+    app.add_handler(CommandHandler("pause",    cmd_pause))
+    app.add_handler(CommandHandler("resume",   cmd_resume))
+    app.add_handler(CommandHandler("log",      cmd_log))
+    app.add_handler(CommandHandler("glossary", cmd_glossary))
 
     app.job_queue.run_repeating(poll_market, interval=POLL_INTERVAL, first=10)
     app.job_queue.run_repeating(heartbeat,   interval=21600, first=21600)  # every 6h
