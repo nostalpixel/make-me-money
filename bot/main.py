@@ -175,6 +175,87 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"⚠️ Error fetching price: {e}")
 
 
+async def cmd_howfar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if str(update.effective_chat.id) != os.environ["TELEGRAM_ALLOWED_CHAT_ID"]:
+        return
+    exchange = make_exchange()
+    try:
+        from strategy import RSI_BUY, RSI_SELL, get_signal, get_regime
+        ohlcv  = await asyncio.to_thread(exchange.fetch_ohlcv, PAIR, TIMEFRAME, limit=CANDLES)
+        _, rsi, macd_hist, _ = get_signal(ohlcv)
+        regime, adx = get_regime(ohlcv)
+        ticker = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+        price  = float(ticker["last"])
+
+        def rsi_bar(val: float) -> str:
+            # 40-char bar spanning RSI 0-100, mark BUY(<45) and SELL(>65) zones
+            bar_len = 30
+            pos     = int(val / 100 * bar_len)
+            buy_pos = int(RSI_BUY / 100 * bar_len)
+            sell_pos = int(RSI_SELL / 100 * bar_len)
+            bar = []
+            for i in range(bar_len):
+                if i == pos:
+                    bar.append("◉")
+                elif i < buy_pos:
+                    bar.append("🟢"[0] if False else "▓")  # BUY zone
+                elif i > sell_pos:
+                    bar.append("▓")  # SELL zone
+                elif i == buy_pos or i == sell_pos:
+                    bar.append("│")
+                else:
+                    bar.append("░")
+            return "".join(bar)
+
+        def macd_bar(val: float) -> str:
+            # 30-char bar, centre = 0, fill based on value
+            bar_len = 30
+            half    = bar_len // 2
+            strength = min(abs(val) / 50, 1.0)  # normalise, cap at 50
+            filled  = int(strength * half)
+            if val > 0:
+                bar = "░" * half + "│" + "█" * filled + "░" * (half - filled)
+            else:
+                bar = "░" * (half - filled) + "█" * filled + "│" + "░" * half
+            return bar
+
+        dist_to_buy  = rsi - RSI_BUY
+        dist_to_sell = RSI_SELL - rsi
+        rsi_status   = "✅ IN BUY ZONE" if rsi < RSI_BUY else ("🔴 IN SELL ZONE" if rsi > RSI_SELL else "⚪ neutral")
+        macd_status  = "✅ positive (BUY side)" if macd_hist > 0 else "❌ negative (not yet)"
+
+        regime_emoji = {"trending": "📊", "choppy": "〰️", "panic": "⚡"}.get(regime, "❓")
+
+        lines = [
+            f"📏 HOW FAR FROM SIGNAL?",
+            f"BTC/USDT @ ${price:,.2f}",
+            f"",
+            f"RSI ({rsi:.1f}) — needs < {RSI_BUY} for BUY",
+            f"0{'':─<5}{RSI_BUY}{'':─<4}[{rsi_bar(rsi)}]{'':─<3}{RSI_SELL}{'':─<4}100",
+            f"  {rsi_status}",
+            f"  📉 {dist_to_buy:+.1f} pts to BUY threshold   📈 {dist_to_sell:+.1f} pts to SELL threshold",
+            f"",
+            f"MACD hist ({macd_hist:+.2f}) — needs > 0 for BUY",
+            f"SELL ◀[{macd_bar(macd_hist)}]▶ BUY",
+            f"  {macd_status}",
+            f"",
+            f"{regime_emoji} Market regime: {regime}  (ADX {adx:.1f})",
+        ]
+
+        if rsi < RSI_BUY and macd_hist > 0:
+            lines.append(f"\n🟢 Both conditions met — BUY signal active (subject to regime/funding filters)")
+        elif rsi < RSI_BUY:
+            lines.append(f"\n🟡 RSI ready, waiting for MACD to turn positive")
+        elif macd_hist > 0:
+            lines.append(f"\n🟡 MACD ready, RSI needs to drop {dist_to_buy:.1f} more points")
+        else:
+            lines.append(f"\n⚪ Neither condition met yet")
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {e}")
+
+
 async def cmd_glossary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_chat.id) != os.environ["TELEGRAM_ALLOWED_CHAT_ID"]:
         return
@@ -483,6 +564,7 @@ async def on_startup(app: Application) -> None:
         BotCommand("status",   "Portfolio balance and open position"),
         BotCommand("price",    "BTC price, 24h range, RSI, Fear & Greed"),
         BotCommand("mc",       "Open Mission Control live dashboard"),
+        BotCommand("howfar",   "How far RSI/MACD are from buy/sell signal"),
         BotCommand("log",      "Last 10 trades"),
         BotCommand("pause",    "Pause new entries"),
         BotCommand("resume",   "Resume trading"),
@@ -569,6 +651,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("price",    cmd_price))
     app.add_handler(CommandHandler("mc",       cmd_mc))
+    app.add_handler(CommandHandler("howfar",   cmd_howfar))
     app.add_handler(CommandHandler("pause",    cmd_pause))
     app.add_handler(CommandHandler("resume",   cmd_resume))
     app.add_handler(CommandHandler("log",      cmd_log))
