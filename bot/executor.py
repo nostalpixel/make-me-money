@@ -8,11 +8,17 @@ import db
 
 logger = logging.getLogger(__name__)
 
-PAIR        = "BTC/USDT"
-POSITION_PCT = 0.50   # 50% of portfolio per trade
-SL_PCT      = -0.05
-TP_PCT      =  0.08
-MIN_ORDER   =  5.0    # Bybit spot minimum notional (USDT)
+PAIR         = "BTC/USDT"
+PERP_PAIR    = "BTC/USDT:USDT"   # perp symbol for funding rate
+POSITION_PCT = 0.50               # 50% of portfolio per trade
+SL_PCT       = -0.05
+TP_PCT       =  0.08
+MIN_ORDER    =  5.0               # Bybit spot minimum notional (USDT)
+
+# Funding / book thresholds
+FUNDING_CROWDED_LONG  =  0.0008  # >0.08%/8hr = crowded long → suppress BUY
+FUNDING_CROWDED_SHORT = -0.0008  # < -0.08%/8hr = crowded short → support BUY
+SPREAD_MAX            =  0.0005  # >0.05% spread = skip trade
 
 
 def _make_exchange(api_key: str, secret: str, testnet: bool) -> ccxt.bybit:
@@ -48,6 +54,44 @@ async def get_total_portfolio(exchange: ccxt.bybit) -> float:
         btc_price = float(ticker["last"])
         return usdt + btc * btc_price
     return usdt
+
+
+async def get_funding_bias(exchange: ccxt.bybit) -> tuple[str, float]:
+    """
+    Returns (bias, rate) from perp funding rate.
+    bias: 'crowded_long' (suppress BUY), 'crowded_short' (supports BUY), 'neutral'
+    """
+    try:
+        fr = await asyncio.to_thread(exchange.fetch_funding_rate, PERP_PAIR)
+        rate = float(fr.get("fundingRate") or 0)
+        if rate > FUNDING_CROWDED_LONG:
+            return "crowded_long", rate
+        if rate < FUNDING_CROWDED_SHORT:
+            return "crowded_short", rate
+        return "neutral", rate
+    except Exception as e:
+        logger.warning("Funding rate fetch failed: %s", e)
+        return "neutral", 0.0
+
+
+async def get_book_health(exchange: ccxt.bybit) -> tuple[bool, float, float]:
+    """
+    Returns (healthy, spread_pct, imbalance).
+    healthy=False means skip trade (spread too wide).
+    imbalance: positive = buy pressure, negative = sell pressure.
+    """
+    try:
+        book      = await asyncio.to_thread(exchange.fetch_order_book, PAIR, 10)
+        bid       = book["bids"][0][0] if book["bids"] else 0
+        ask       = book["asks"][0][0] if book["asks"] else 0
+        spread    = (ask - bid) / bid if bid > 0 else 1.0
+        bid_vol   = sum(b[1] for b in book["bids"][:10])
+        ask_vol   = sum(a[1] for a in book["asks"][:10])
+        imbalance = (bid_vol - ask_vol) / (bid_vol + ask_vol) if (bid_vol + ask_vol) > 0 else 0
+        return spread <= SPREAD_MAX, spread * 100, imbalance
+    except Exception as e:
+        logger.warning("Order book fetch failed: %s", e)
+        return True, 0.0, 0.0
 
 
 async def place_buy(exchange: ccxt.bybit) -> dict | None:

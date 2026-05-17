@@ -6,6 +6,37 @@ RSI_PERIOD = 14
 RSI_BUY    = 45   # loosened from 30 — RSI rarely hits 30 in bull markets
 RSI_SELL   = 65   # loosened from 70
 
+# Regime thresholds
+ADX_TREND_MIN  = 22    # ADX above this = trending market
+ATR_PANIC_MULT = 2.0   # ATR ratio above this = panic/volatile market
+
+
+def get_regime(ohlcv: list[list]) -> tuple[str, float]:
+    """
+    Returns (regime, adx) where regime is 'trending', 'choppy', or 'panic'.
+    trending = good for entries, choppy = skip entries, panic = alert + skip.
+    """
+    if len(ohlcv) < 30:
+        return "unknown", 0.0
+
+    ohlcv = ohlcv[:-1]
+    df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
+    df[["high", "low", "close"]] = df[["high", "low", "close"]].astype(float)
+
+    adx = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14).adx()
+    atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range()
+
+    last_adx  = float(adx.iloc[-1])
+    last_atr  = float(atr.iloc[-1])
+    mean_atr  = float(atr.rolling(20).mean().iloc[-1])
+    atr_ratio = last_atr / mean_atr if mean_atr > 0 else 1.0
+
+    if atr_ratio > ATR_PANIC_MULT:
+        return "panic", last_adx
+    if last_adx > ADX_TREND_MIN:
+        return "trending", last_adx
+    return "choppy", last_adx
+
 
 def get_signal(ohlcv: list[list]) -> tuple[str, float, float, str]:
     """

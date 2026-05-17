@@ -18,7 +18,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 import db
 import executor
 import reporter
-from strategy import get_signal
+from reporter import START_USDT
+from strategy import get_signal, get_regime
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
@@ -260,19 +261,55 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
         # ── No position: look for entry ───────────────────────────────────
         ohlcv     = await asyncio.to_thread(exchange.fetch_ohlcv, PAIR, TIMEFRAME, limit=CANDLES)
         signal, rsi, macd_hist, reason = get_signal(ohlcv)
+        regime, adx = get_regime(ohlcv)
         portfolio = await executor.get_total_portfolio(exchange)
 
         ticker    = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
         price     = float(ticker["last"])
 
-        logger.info("Signal: %s | RSI=%.1f MACD=%.4f | %s", signal, rsi, macd_hist, reason)
-        await alert(reporter.signal_card(signal, rsi, macd_hist, reason, price, portfolio))
+        # Fetch market context (non-blocking — failures just return defaults)
+        funding_bias, funding_rate = await executor.get_funding_bias(exchange)
+        book_healthy, spread_pct, book_imbalance = await executor.get_book_health(exchange)
+
+        # Store context for Mission Control
+        context.bot_data["regime"]         = regime
+        context.bot_data["adx"]            = adx
+        context.bot_data["funding_bias"]   = funding_bias
+        context.bot_data["funding_rate"]   = funding_rate
+        context.bot_data["spread_pct"]     = spread_pct
+        context.bot_data["book_imbalance"] = book_imbalance
+        context.bot_data["last_rsi"]       = rsi
+        context.bot_data["last_macd"]      = macd_hist
+        context.bot_data["last_price"]     = price
+
+        logger.info("Signal: %s | RSI=%.1f MACD=%.4f | Regime=%s ADX=%.1f | Funding=%s",
+                    signal, rsi, macd_hist, regime, adx, funding_bias)
+        await alert(reporter.signal_card(signal, rsi, macd_hist, reason, price, portfolio,
+                                         regime=regime, funding_bias=funding_bias))
 
         if signal != "BUY":
             return
 
         if context.bot_data.get("paused"):
             logger.info("Paused — skipping BUY entry")
+            return
+
+        # Regime filter — skip in choppy or panic
+        if regime == "panic":
+            await alert(f"⚡ BUY signal suppressed — market in PANIC mode (ATR spike). Waiting for calm.")
+            return
+        if regime == "choppy":
+            await alert(f"⚠️ BUY signal suppressed — market CHOPPY (ADX {adx:.1f}). Waiting for trend.")
+            return
+
+        # Funding filter — skip if longs are crowded
+        if funding_bias == "crowded_long":
+            await alert(f"⚠️ BUY signal suppressed — perp funding rate {funding_rate*100:.4f}% (crowded longs). Waiting.")
+            return
+
+        # Book health filter — skip on wide spread
+        if not book_healthy:
+            await alert(f"⚠️ BUY signal suppressed — spread {spread_pct:.3f}% too wide. Waiting for liquidity.")
             return
 
         if portfolio < executor.MIN_ORDER * 2:
@@ -343,6 +380,96 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Daily summary error: %s", e)
 
 
+# ── Mission Control ───────────────────────────────────────────────────────────
+
+async def _build_mc_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    import datetime as dt
+    exchange  = make_exchange()
+    portfolio = await executor.get_total_portfolio(exchange)
+    usdt_bal  = await executor.get_balance(exchange)
+    btc_bal   = await executor.get_btc_balance(exchange)
+    position  = db.get_open_position()
+    ticker    = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+    price     = float(ticker["last"])
+    change    = float(ticker.get("percentage") or 0)
+
+    regime       = context.bot_data.get("regime", "—")
+    funding_bias = context.bot_data.get("funding_bias", "—")
+    rsi          = context.bot_data.get("last_rsi", 0.0)
+    macd         = context.bot_data.get("last_macd", 0.0)
+    spread       = context.bot_data.get("spread_pct", 0.0)
+    paused       = context.bot_data.get("paused", False)
+
+    regime_emoji  = {"trending": "📊", "choppy": "〰️", "panic": "⚡"}.get(regime, "❓")
+    funding_emoji = {"crowded_long": "🔴", "crowded_short": "🟢", "neutral": "⚪"}.get(funding_bias, "⚪")
+    change_sign   = "+" if change >= 0 else ""
+    pnl_from_start = (portfolio - START_USDT) / START_USDT * 100
+
+    lines = [
+        f"🖥️  MISSION CONTROL  —  {dt.datetime.now(dt.timezone.utc).strftime('%H:%M UTC')}",
+        f"",
+        f"₿ ${price:,.2f} ({change_sign}{change:.1f}%)  |  {regime_emoji} {regime}  |  {funding_emoji} {funding_bias}",
+        f"📈 RSI: {rsi:.1f}  MACD: {macd:+.2f}  Spread: {spread:.3f}%",
+        f"",
+    ]
+
+    if position:
+        entry   = position["entry_price"]
+        pnl_pct = (price - entry) / entry * 100
+        pnl_usd = (price - entry) / entry * position["size_usdt"]
+        tp      = entry * (1 + executor.TP_PCT)
+        entry_dt = dt.datetime.fromisoformat(position["ts"].replace("Z", "+00:00"))
+        elapsed  = dt.datetime.now(dt.timezone.utc) - entry_dt
+        h, rem   = divmod(int(elapsed.total_seconds()), 3600)
+        m        = rem // 60
+        lines += [
+            f"📍 Holding  {h}h {m}m",
+            f"  Bought ${entry:,.2f} → ${price:,.2f}  ({pnl_pct:+.2f}%  ${pnl_usd:+.4f})",
+            f"  Auto-sell at: ${tp:,.2f}",
+            f"",
+        ]
+    else:
+        lines += [f"📍 No position  |  {'⏸ PAUSED' if paused else '▶️ watching'}", ""]
+
+    lines += [
+        f"💼 ${portfolio:.4f}  ({pnl_from_start:+.1f}% vs start)",
+        f"  USDT ${usdt_bal:.4f}  |  BTC {btc_bal:.6f} (${btc_bal*price:.4f})",
+    ]
+    return "\n".join(lines)
+
+
+async def mission_control_update(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Silently edit the Mission Control message every 15 min."""
+    mc_msg_id = context.bot_data.get("mc_msg_id")
+    chat_id   = os.environ["TELEGRAM_ALLOWED_CHAT_ID"]
+    try:
+        text = await _build_mc_text(context)
+        if mc_msg_id:
+            try:
+                await context.bot.edit_message_text(chat_id=chat_id, message_id=mc_msg_id, text=text)
+            except Exception:
+                # Message too old or deleted — send a fresh one
+                msg = await context.bot.send_message(chat_id=chat_id, text=text)
+                context.bot_data["mc_msg_id"] = msg.message_id
+        else:
+            msg = await context.bot.send_message(chat_id=chat_id, text=text)
+            context.bot_data["mc_msg_id"] = msg.message_id
+    except Exception as e:
+        logger.error("Mission Control update error: %s", e)
+
+
+async def cmd_mc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a fresh Mission Control message and track its ID for auto-updates."""
+    if str(update.effective_chat.id) != os.environ["TELEGRAM_ALLOWED_CHAT_ID"]:
+        return
+    try:
+        text = await _build_mc_text(context)
+        msg  = await update.message.reply_text(text)
+        context.bot_data["mc_msg_id"] = msg.message_id
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ {e}")
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 async def on_startup(app: Application) -> None:
@@ -355,6 +482,7 @@ async def on_startup(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("status",   "Portfolio balance and open position"),
         BotCommand("price",    "BTC price, 24h range, RSI, Fear & Greed"),
+        BotCommand("mc",       "Open Mission Control live dashboard"),
         BotCommand("log",      "Last 10 trades"),
         BotCommand("pause",    "Pause new entries"),
         BotCommand("resume",   "Resume trading"),
@@ -440,13 +568,15 @@ def main() -> None:
 
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("price",    cmd_price))
+    app.add_handler(CommandHandler("mc",       cmd_mc))
     app.add_handler(CommandHandler("pause",    cmd_pause))
     app.add_handler(CommandHandler("resume",   cmd_resume))
     app.add_handler(CommandHandler("log",      cmd_log))
     app.add_handler(CommandHandler("glossary", cmd_glossary))
 
-    app.job_queue.run_repeating(poll_market, interval=POLL_INTERVAL, first=10)
-    app.job_queue.run_repeating(heartbeat,   interval=21600, first=21600)  # every 6h
+    app.job_queue.run_repeating(poll_market,           interval=POLL_INTERVAL, first=10)
+    app.job_queue.run_repeating(mission_control_update, interval=POLL_INTERVAL, first=20)
+    app.job_queue.run_repeating(heartbeat,             interval=21600, first=21600)
     app.job_queue.run_daily(daily_summary, time=__import__("datetime").time(DAILY_HOUR, DAILY_MIN))
 
     # Graceful shutdown on SIGTERM
