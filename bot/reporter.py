@@ -26,31 +26,41 @@ async def send(context, text: str) -> None:
             logger.error("Telegram send error: %s", e)
 
 
-def trade_card(action: str, price: float, size_usdt: float, reason: str, portfolio: float) -> str:
-    pnl_total = db.total_pnl()
-    pnl_pct   = (portfolio - START_USDT) / START_USDT * 100
-    distance  = GOAL_USDT - portfolio
+def signal_card(signal: str, rsi: float, macd_hist: float, reason: str, price: float, portfolio: float) -> str:
+    emoji      = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⚪"}.get(signal, "❓")
+    pnl_pct    = (portfolio - START_USDT) / START_USDT * 100
+    hist_arrow = "↑" if macd_hist > 0 else "↓"
     return (
-        f"🤖 {action}\n"
-        f"Pair: BTC/USDT\n"
-        f"Size: ${size_usdt:.2f}\n"
-        f"Price: ${price:,.2f}\n"
-        f"Reason: {reason}\n"
-        f"Portfolio: ${portfolio:.2f} USDT ({pnl_pct:+.1f}%)\n"
-        f"Target: ${GOAL_USDT:.0f} | Distance: ${distance:.2f}"
+        f"{emoji} {signal}  —  BTC/USDT ${price:,.2f}\n"
+        f"📈 RSI: {rsi:.1f}  |  MACD: {macd_hist:+.2f} {hist_arrow}\n"
+        f"💬 {reason}\n"
+        f"💼 Portfolio: ${portfolio:.2f} ({pnl_pct:+.1f}%)"
+    )
+
+
+def trade_card(action: str, price: float, size_usdt: float, reason: str, portfolio: float) -> str:
+    pnl_pct  = (portfolio - START_USDT) / START_USDT * 100
+    distance = GOAL_USDT - portfolio
+    return (
+        f"🚀 BUY executed  —  BTC/USDT\n"
+        f"💵 Spent: ${size_usdt:.2f}  |  Price: ${price:,.2f}\n"
+        f"💬 {reason}\n"
+        f"💼 Portfolio: ${portfolio:.2f} ({pnl_pct:+.1f}%)\n"
+        f"🎯 Goal: ${GOAL_USDT:.0f}  |  Remaining: ${distance:.2f}"
     )
 
 
 def close_card(reason: str, exit_price: float, pnl_usdt: float, portfolio: float) -> str:
-    emoji  = "✅" if pnl_usdt >= 0 else "❌"
-    label  = reason.replace("_", " ").upper()
+    win       = pnl_usdt >= 0
+    emoji     = "✅" if win else "❌"
+    label     = "TAKE PROFIT" if reason == "take_profit" else "ALERT THRESHOLD HIT"
     pnl_pct_total = (portfolio - START_USDT) / START_USDT * 100
     return (
-        f"{emoji} {label}\n"
-        f"BTC/USDT exit: ${exit_price:,.2f}\n"
-        f"Trade P&L: ${pnl_usdt:+.4f}\n"
-        f"Portfolio: ${portfolio:.2f} ({pnl_pct_total:+.1f}%)\n"
-        f"Daily P&L: ${db.daily_pnl():+.4f}"
+        f"{emoji} {label}  —  BTC/USDT\n"
+        f"💵 Exit price: ${exit_price:,.2f}\n"
+        f"{'📈' if win else '📉'} Trade P&L: ${pnl_usdt:+.4f}\n"
+        f"💼 Portfolio: ${portfolio:.2f} ({pnl_pct_total:+.1f}%)\n"
+        f"📅 Today's P&L: ${db.daily_pnl():+.4f}"
     )
 
 
@@ -58,16 +68,16 @@ def status_card(portfolio: float, position: dict | None) -> str:
     pnl_total = db.total_pnl()
     pnl_pct   = (portfolio - START_USDT) / START_USDT * 100
     pos_line  = (
-        f"Position: BTC/USDT entry=${position['entry_price']:,.2f} size=${position['size_usdt']:.2f}"
-        if position else "Position: none (holding USDT)"
+        f"📍 BTC/USDT  entry=${position['entry_price']:,.2f}  size=${position['size_usdt']:.2f}"
+        if position else "📍 No open position"
     )
     return (
         f"📊 STATUS\n"
-        f"Portfolio: ${portfolio:.2f} ({pnl_pct:+.1f}%)\n"
-        f"Total P&L: ${pnl_total:+.4f}\n"
-        f"Daily P&L: ${db.daily_pnl():+.4f}\n"
+        f"💼 Portfolio: ${portfolio:.2f} ({pnl_pct:+.1f}%)\n"
+        f"📈 Total P&L: ${pnl_total:+.4f}\n"
+        f"📅 Today's P&L: ${db.daily_pnl():+.4f}\n"
         f"{pos_line}\n"
-        f"Goal: ${GOAL_USDT:.0f}"
+        f"🎯 Goal: ${GOAL_USDT:.0f}"
     )
 
 
@@ -78,13 +88,14 @@ def daily_summary_card(portfolio: float) -> str:
     today     = datetime.now(timezone.utc).date().isoformat()
     pnl_pct   = (portfolio - START_USDT) / START_USDT * 100
     distance  = GOAL_USDT - portfolio
+    day_emoji = "📈" if pnl_day >= 0 else "📉"
     return (
-        f"☀️ DAILY SUMMARY — {today}\n"
-        f"Today P&L: ${pnl_day:+.4f}\n"
-        f"Total P&L: ${pnl_total:+.4f}\n"
-        f"Portfolio: ${portfolio:.2f} ({pnl_pct:+.1f}%)\n"
-        f"Target: ${GOAL_USDT:.0f} | Distance: ${distance:.2f}\n"
-        f"Trades today: {sum(1 for t in trades if t['ts'][:10] == today)}"
+        f"☀️ DAILY SUMMARY  —  {today}\n"
+        f"{day_emoji} Today: ${pnl_day:+.4f}\n"
+        f"📊 Total P&L: ${pnl_total:+.4f}\n"
+        f"💼 Portfolio: ${portfolio:.2f} ({pnl_pct:+.1f}%)\n"
+        f"🎯 Goal: ${GOAL_USDT:.0f}  |  Distance: ${distance:.2f}\n"
+        f"🔁 Trades today: {sum(1 for t in trades if t['ts'][:10] == today)}"
     )
 
 

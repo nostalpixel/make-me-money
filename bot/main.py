@@ -9,6 +9,7 @@ import signal
 import sqlite3
 import sys
 
+import aiohttp
 import ccxt
 from dotenv import load_dotenv
 from telegram import Update
@@ -49,10 +50,49 @@ def make_exchange() -> ccxt.bybit:
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if str(update.effective_chat.id) != os.environ["TELEGRAM_ALLOWED_CHAT_ID"]:
         return
-    exchange = make_exchange()
+    import datetime as dt
+    exchange  = make_exchange()
     portfolio = await executor.get_total_portfolio(exchange)
+    usdt_bal  = await executor.get_balance(exchange)
+    btc_bal   = await executor.get_btc_balance(exchange)
     position  = db.get_open_position()
-    await update.message.reply_text(reporter.status_card(portfolio, position))
+    ticker    = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+    price     = float(ticker["last"])
+    paused    = context.bot_data.get("paused", False)
+
+    pnl_from_start = portfolio - 10.0  # vs $10 starting capital
+    pnl_pct_start  = pnl_from_start / 10.0 * 100
+
+    lines = [
+        f"📊 STATUS  {'⏸ PAUSED' if paused else '▶️ TRADING'}",
+        f"BTC/USDT: ${price:,.2f}",
+        f"",
+        f"💰 Portfolio: ${portfolio:.4f} ({pnl_pct_start:+.1f}% vs start)",
+        f"  USDT: ${usdt_bal:.4f}",
+        f"  BTC:  {btc_bal:.6f} (${btc_bal * price:.4f})",
+    ]
+
+    if position:
+        entry      = position["entry_price"]
+        pnl_pct    = (price - entry) / entry * 100
+        pnl_usdt   = (price - entry) / entry * position["size_usdt"]
+        tp_price   = entry * (1 + executor.TP_PCT)
+        entry_time = dt.datetime.fromisoformat(position["ts"].replace("Z", "+00:00"))
+        now        = dt.datetime.now(dt.timezone.utc)
+        elapsed    = now - entry_time
+        hours, rem = divmod(int(elapsed.total_seconds()), 3600)
+        mins       = rem // 60
+        lines += [
+            f"",
+            f"📍 Open position",
+            f"  Bought at: ${entry:,.2f} | {hours}h {mins}m ago",
+            f"  Profit/Loss: {pnl_pct:+.2f}% (${pnl_usdt:+.4f})",
+            f"  Auto-sell at: ${tp_price:,.2f} (+8%)",
+        ]
+    else:
+        lines += ["", "📍 No open position — watching for entry signal"]
+
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -81,6 +121,57 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         status = f"{t['exit_reason']} {t['pnl_usdt']:+.4f}" if t["status"] == "closed" else "OPEN"
         lines.append(f"{t['ts'][:16]} {t['side'].upper()} ${t['size_usdt']:.2f} → {status}")
     await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if str(update.effective_chat.id) != os.environ["TELEGRAM_ALLOWED_CHAT_ID"]:
+        return
+    exchange = make_exchange()
+    try:
+        ticker  = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+        price   = float(ticker["last"])
+        change  = float(ticker.get("percentage") or 0)
+        high24  = float(ticker.get("high") or 0)
+        low24   = float(ticker.get("low") or 0)
+        bid     = float(ticker.get("bid") or price)
+        ask     = float(ticker.get("ask") or price)
+        spread  = (ask - bid) / bid * 100 if bid > 0 else 0
+
+        ohlcv   = await asyncio.to_thread(exchange.fetch_ohlcv, PAIR, TIMEFRAME, limit=CANDLES)
+        signal, rsi, macd_hist, _ = get_signal(ohlcv)
+        signal_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⚪"}.get(signal, "⚪")
+
+        fg_label, fg_value = "Unknown", "?"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://api.alternative.me/fng/?limit=1", timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    data = await r.json()
+                    fg_value = int(data["data"][0]["value"])
+                    fg_raw   = data["data"][0]["value_classification"]
+                    fg_label = fg_raw
+                    fg_emoji = "😱" if fg_value < 25 else "😨" if fg_value < 45 else "😐" if fg_value < 55 else "😊" if fg_value < 75 else "🤑"
+        except Exception:
+            fg_emoji = "❓"
+
+        change_sign = "+" if change >= 0 else ""
+        lines = [
+            f"₿ BTC/USDT  ${price:,.2f}  ({change_sign}{change:.1f}%)",
+            f"24h: ${low24:,.0f} – ${high24:,.0f}",
+            f"Spread: {spread:.3f}%",
+            f"",
+            f"{signal_emoji} Signal: {signal}",
+            f"RSI: {rsi:.1f} | MACD hist: {macd_hist:+.2f}",
+            f"",
+            f"{fg_emoji} Fear & Greed: {fg_value}/100 ({fg_label})",
+        ]
+        if fg_value < 30:
+            lines.append("Historically: extreme fear = potential buying opportunity")
+        elif fg_value > 75:
+            lines.append("Historically: extreme greed = consider taking profit")
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error fetching price: {e}")
 
 
 async def cmd_glossary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -263,6 +354,7 @@ async def on_startup(app: Application) -> None:
     from telegram import BotCommand
     await app.bot.set_my_commands([
         BotCommand("status",   "Portfolio balance and open position"),
+        BotCommand("price",    "BTC price, 24h range, RSI, Fear & Greed"),
         BotCommand("log",      "Last 10 trades"),
         BotCommand("pause",    "Pause new entries"),
         BotCommand("resume",   "Resume trading"),
@@ -347,6 +439,7 @@ def main() -> None:
     app.bot_data["paused"] = False
 
     app.add_handler(CommandHandler("status",   cmd_status))
+    app.add_handler(CommandHandler("price",    cmd_price))
     app.add_handler(CommandHandler("pause",    cmd_pause))
     app.add_handler(CommandHandler("resume",   cmd_resume))
     app.add_handler(CommandHandler("log",      cmd_log))
