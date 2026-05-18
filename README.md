@@ -194,3 +194,24 @@ TON_MNEMONIC=word1 word2 ... word24   # 24-word TON wallet mnemonic
 | `/tonlog` | Last 10 TON trades |
 | `/tonpause` | Pause TON trading |
 | `/tonresume` | Resume TON trading |
+
+---
+
+## Updates — 2026-05-18
+
+### Strategy upgrades
+
+- **Regime filter** — ADX(14) + ATR ratio now classify market as `trending`, `choppy`, or `panic`. Entries blocked in choppy/panic regimes.
+- **Repainting fix** — last (still-forming) candle is now dropped before signal calculation to prevent false signals.
+- **Funding rate bias** — fetched from Bybit perpetuals as a contrarian signal (`crowded_long` / `crowded_short` / `neutral`).
+
+### New Telegram commands
+
+| Command | Description |
+|---------|-------------|
+| `/price` | Live BTC price, 24h range, spread, current signal, Fear & Greed index |
+| `/howfar` | Visual RSI/MACD bars showing exactly how far from a BUY signal |
+
+### Signal updates every poll
+
+The bot now sends a Telegram message every 15 minutes (when no position is open) with the current signal, RSI, MACD histogram, regime, and the reason it's holding — so you're never in the dark.
