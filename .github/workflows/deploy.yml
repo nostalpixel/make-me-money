@@ -14,11 +14,13 @@ jobs:
       - name: Sync code to server
         env:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
         run: |
           mkdir -p ~/.ssh
           echo "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H REDACTED_IP >> ~/.ssh/known_hosts
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
 
           rsync -az --delete \
             --exclude='.git' \
@@ -28,13 +30,13 @@ jobs:
             --exclude='bot.log' \
             --exclude='__pycache__' \
             -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
-            ./ ec2-user@REDACTED_IP:~/make-me-money/
+            ./ "$EC2_USER@$EC2_HOST:~/make-me-money/"
 
       - name: Restart bot
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: REDACTED_IP
-          username: ec2-user
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             set -e
