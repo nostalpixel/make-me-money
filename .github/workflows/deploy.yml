@@ -1,0 +1,45 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync code to server
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H REDACTED_IP >> ~/.ssh/known_hosts
+
+          rsync -az --delete \
+            --exclude='.git' \
+            --exclude='.env' \
+            --exclude='trade.db' \
+            --exclude='ton.db' \
+            --exclude='bot.log' \
+            --exclude='__pycache__' \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
+            ./ ec2-user@REDACTED_IP:~/make-me-money/
+
+      - name: Restart bot
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: REDACTED_IP
+          username: ec2-user
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/make-me-money
+            docker compose up -d --build bot
+            docker image prune -f
+            echo "Bot deployed at $(date)"
+            docker compose ps
