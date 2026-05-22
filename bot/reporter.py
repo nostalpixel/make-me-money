@@ -26,17 +26,42 @@ async def send(context, text: str) -> None:
             logger.error("Telegram send error: %s", e)
 
 
+def rsi_zone(rsi: float, rsi_buy: float = 45, rsi_sell: float = 65) -> str:
+    if rsi < rsi_buy:
+        return "oversold"
+    if rsi > rsi_sell:
+        return "overbought"
+    return "neutral"
+
+
 def signal_card(signal: str, rsi: float, macd_hist: float, reason: str, price: float, portfolio: float,
-                regime: str = "unknown", funding_bias: str = "neutral") -> str:
-    emoji      = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⚪"}.get(signal, "❓")
-    pnl_pct    = (portfolio - START_USDT) / START_USDT * 100
-    hist_arrow = "↑" if macd_hist > 0 else "↓"
-    regime_emoji = {"trending": "📊", "choppy": "〰️", "panic": "⚡", "unknown": "❓"}.get(regime, "❓")
+                regime: str = "unknown", funding_bias: str = "neutral",
+                adx: float = 0.0, book_healthy: bool = True) -> str:
+    from strategy import RSI_BUY, RSI_SELL, ADX_TREND_MIN
+    emoji         = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⚪"}.get(signal, "❓")
+    pnl_pct       = (portfolio - START_USDT) / START_USDT * 100
+    hist_arrow    = "↑" if macd_hist > 0 else "↓"
+    regime_emoji  = {"trending": "📊", "choppy": "〰️", "panic": "⚡", "unknown": "❓"}.get(regime, "❓")
     funding_emoji = {"crowded_long": "🔴", "crowded_short": "🟢", "neutral": "⚪"}.get(funding_bias, "⚪")
+
+    # Decision trace: which BUY conditions passed/failed
+    c_rsi     = "✅" if rsi < RSI_BUY     else "❌"
+    c_macd    = "✅" if macd_hist > 0      else "❌"
+    c_regime  = "✅" if regime == "trending" else "❌"
+    c_funding = "✅" if funding_bias != "crowded_long" else "❌"
+    c_book    = "✅" if book_healthy       else "❌"
+    zone      = rsi_zone(rsi, RSI_BUY, RSI_SELL)
+
+    trace = (
+        f"🔍 RSI {rsi:.0f} ({zone}) {c_rsi}  MACD {macd_hist:+.2f} {c_macd}  "
+        f"Trend {c_regime}  Fund {c_funding}  Book {c_book}"
+    )
+
     return (
         f"{emoji} {signal}  —  BTC/USDT ${price:,.2f}\n"
-        f"📈 RSI: {rsi:.1f}  |  MACD: {macd_hist:+.2f} {hist_arrow}\n"
+        f"📈 RSI: {rsi:.1f}  |  MACD: {macd_hist:+.2f} {hist_arrow}  |  ADX: {adx:.1f}\n"
         f"{regime_emoji} Regime: {regime}  |  {funding_emoji} Funding: {funding_bias}\n"
+        f"{trace}\n"
         f"💬 {reason}\n"
         f"💼 Portfolio: ${portfolio:.2f} ({pnl_pct:+.1f}%)"
     )

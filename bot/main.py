@@ -292,6 +292,41 @@ async def cmd_glossary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+async def cmd_why(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if str(update.effective_chat.id) != os.environ["TELEGRAM_ALLOWED_CHAT_ID"]:
+        return
+    sig    = context.bot_data.get("last_signal")
+    if sig is None:
+        await update.message.reply_text("No signal computed yet — wait for the next poll.")
+        return
+    rsi          = context.bot_data.get("last_rsi", 0.0)
+    macd         = context.bot_data.get("last_macd", 0.0)
+    adx          = context.bot_data.get("adx", 0.0)
+    regime       = context.bot_data.get("regime", "unknown")
+    funding_bias = context.bot_data.get("funding_bias", "neutral")
+    funding_rate = context.bot_data.get("funding_rate", 0.0)
+    spread       = context.bot_data.get("spread_pct", 0.0)
+    book_healthy = context.bot_data.get("book_healthy", True)
+    reason       = context.bot_data.get("last_reason", "—")
+    price        = context.bot_data.get("last_price", 0.0)
+
+    from strategy import RSI_BUY, RSI_SELL, ADX_TREND_MIN
+    checks = [
+        ("RSI",     f"{rsi:.1f} < {RSI_BUY}",          rsi < RSI_BUY),
+        ("MACD",    f"hist {macd:+.2f} > 0",            macd > 0),
+        ("Regime",  f"{regime} (need trending)",        regime == "trending"),
+        ("ADX",     f"{adx:.1f} > {ADX_TREND_MIN}",    adx > ADX_TREND_MIN),
+        ("Funding", f"{funding_bias}",                   funding_bias != "crowded_long"),
+        ("Book",    f"spread {spread:.3f}%",            book_healthy),
+    ]
+    lines = [f"🔍 Why {sig}?  BTC ${price:,.2f}\n"]
+    for name, detail, passed in checks:
+        mark = "✅" if passed else "❌"
+        lines.append(f"  {mark} {name}: {detail}")
+    lines.append(f"\n💬 {reason}")
+    await update.message.reply_text("\n".join(lines))
+
+
 # ── Polling job ───────────────────────────────────────────────────────────────
 
 async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -352,7 +387,29 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
         funding_bias, funding_rate = await executor.get_funding_bias(exchange)
         book_healthy, spread_pct, book_imbalance = await executor.get_book_health(exchange)
 
-        # Store context for Mission Control
+        # ── Delta detection: fire immediately on state flips ─────────────────
+        prev_regime    = context.bot_data.get("prev_regime")
+        prev_macd_sign = context.bot_data.get("prev_macd_sign")
+        prev_rsi_zone  = context.bot_data.get("prev_rsi_zone")
+        cur_macd_sign  = 1 if macd_hist > 0 else -1
+        cur_rsi_zone   = reporter.rsi_zone(rsi)
+
+        delta_lines = []
+        if prev_regime and prev_regime != regime:
+            delta_lines.append(f"  Regime: {prev_regime} → {regime}")
+        if prev_macd_sign is not None and prev_macd_sign != cur_macd_sign:
+            direction = "crossed zero ↑" if cur_macd_sign > 0 else "crossed zero ↓"
+            delta_lines.append(f"  MACD: {direction} ({macd_hist:+.2f})")
+        if prev_rsi_zone and prev_rsi_zone != cur_rsi_zone:
+            delta_lines.append(f"  RSI: {prev_rsi_zone} → {cur_rsi_zone} ({rsi:.1f})")
+
+        if delta_lines:
+            await alert("🔔 MARKET CHANGE\n" + "\n".join(delta_lines))
+
+        # Store context for Mission Control + delta tracking
+        context.bot_data["prev_regime"]    = regime
+        context.bot_data["prev_macd_sign"] = cur_macd_sign
+        context.bot_data["prev_rsi_zone"]  = cur_rsi_zone
         context.bot_data["regime"]         = regime
         context.bot_data["adx"]            = adx
         context.bot_data["funding_bias"]   = funding_bias
@@ -362,6 +419,9 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.bot_data["last_rsi"]       = rsi
         context.bot_data["last_macd"]      = macd_hist
         context.bot_data["last_price"]     = price
+        context.bot_data["last_signal"]    = signal
+        context.bot_data["last_reason"]    = reason
+        context.bot_data["book_healthy"]   = book_healthy
 
         logger.info("Signal: %s | RSI=%.1f MACD=%.4f | Regime=%s ADX=%.1f | Funding=%s",
                     signal, rsi, macd_hist, regime, adx, funding_bias)
@@ -375,7 +435,8 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if signal_changed or signal != "HOLD" or hold_overdue:
             await alert(reporter.signal_card(signal, rsi, macd_hist, reason, price, portfolio,
-                                             regime=regime, funding_bias=funding_bias))
+                                             regime=regime, funding_bias=funding_bias,
+                                             adx=adx, book_healthy=book_healthy))
             context.bot_data["last_notified_signal"] = signal
             context.bot_data["last_notif_ts"]        = now_ts
 
@@ -576,6 +637,7 @@ async def on_startup(app: Application) -> None:
         BotCommand("price",    "BTC price, 24h range, RSI, Fear & Greed"),
         BotCommand("mc",       "Open Mission Control live dashboard"),
         BotCommand("howfar",   "How far RSI/MACD are from buy/sell signal"),
+        BotCommand("why",      "Why did the bot just signal BUY/HOLD?"),
         BotCommand("log",      "Last 10 trades"),
         BotCommand("pause",    "Pause new entries"),
         BotCommand("resume",   "Resume trading"),
@@ -663,6 +725,7 @@ def main() -> None:
     app.add_handler(CommandHandler("price",    cmd_price))
     app.add_handler(CommandHandler("mc",       cmd_mc))
     app.add_handler(CommandHandler("howfar",   cmd_howfar))
+    app.add_handler(CommandHandler("why",      cmd_why))
     app.add_handler(CommandHandler("pause",    cmd_pause))
     app.add_handler(CommandHandler("resume",   cmd_resume))
     app.add_handler(CommandHandler("log",      cmd_log))
