@@ -365,8 +365,19 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         logger.info("Signal: %s | RSI=%.1f MACD=%.4f | Regime=%s ADX=%.1f | Funding=%s",
                     signal, rsi, macd_hist, regime, adx, funding_bias)
-        await alert(reporter.signal_card(signal, rsi, macd_hist, reason, price, portfolio,
-                                         regime=regime, funding_bias=funding_bias))
+
+        # Throttle HOLD notifications: send only on signal change or every 4 hours
+        last_signal   = context.bot_data.get("last_notified_signal")
+        last_notif_ts = context.bot_data.get("last_notif_ts", 0)
+        now_ts        = asyncio.get_event_loop().time()
+        signal_changed = signal != last_signal
+        hold_overdue   = signal == "HOLD" and (now_ts - last_notif_ts) >= 4 * 3600
+
+        if signal_changed or signal != "HOLD" or hold_overdue:
+            await alert(reporter.signal_card(signal, rsi, macd_hist, reason, price, portfolio,
+                                             regime=regime, funding_bias=funding_bias))
+            context.bot_data["last_notified_signal"] = signal
+            context.bot_data["last_notif_ts"]        = now_ts
 
         if signal != "BUY":
             return
