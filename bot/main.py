@@ -17,6 +17,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 import db
 import executor
+import feed
 import reporter
 from reporter import START_USDT
 from strategy import get_signal, get_regime
@@ -712,6 +713,7 @@ def main() -> None:
         sys.exit(f"Missing env vars: {', '.join(missing)}")
 
     db.init()
+    feed.start()
 
     app = (
         Application.builder()

@@ -1,8 +1,17 @@
+networks:
+  npnet:
+    external: true
+
 services:
   bot:
     build: .
+    container_name: mmm-bot
     restart: unless-stopped
     env_file: .env
+    expose:
+      - "8001"
+    networks:
+      - npnet
     volumes:
       - ./trade.db:/app/bot/trade.db
       - ./social:/app/social
