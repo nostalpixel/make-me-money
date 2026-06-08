@@ -62,8 +62,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     price     = float(ticker["last"])
     paused    = context.bot_data.get("paused", False)
 
-    pnl_from_start = portfolio - 10.0  # vs $10 starting capital
-    pnl_pct_start  = pnl_from_start / 10.0 * 100
+    pnl_from_start = portfolio - 40.0  # vs $40 starting capital
+    pnl_pct_start  = pnl_from_start / 40.0 * 100
 
     lines = [
         f"📊 STATUS  {'⏸ PAUSED' if paused else '▶️ TRADING'}",

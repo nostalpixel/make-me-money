@@ -7,8 +7,8 @@ import db
 logger = logging.getLogger(__name__)
 
 SOCIAL_FILE = Path(__file__).parent.parent / "social" / "X.md"
-GOAL_USDT   = 40.0
-START_USDT  = 20.0
+GOAL_USDT   = 1000.0
+START_USDT  = 40.0
 SIG_THRESHOLD = 5.0  # % P&L to trigger X post draft
 
 
