@@ -17,6 +17,18 @@ services:
       - ./social:/app/social
       - ./bot.log:/app/bot/bot.log
 
+  agg-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.agg
+    container_name: mmm-agg-bot
+    restart: unless-stopped
+    env_file: .env
+    networks:
+      - npnet
+    volumes:
+      - ./agg.db:/app/agg-bot/agg.db
+
   ton-bot:
     build:
       context: .
