@@ -351,28 +351,6 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                 portfolio = await executor.get_total_portfolio(exchange)
                 await alert(reporter.close_card(trigger, result["exit_price"], result["pnl_usdt"], portfolio))
                 reporter.maybe_append_x_post("sold", result["exit_price"], result["pnl_usdt"], portfolio)
-            else:
-                # Send hourly hold update (every 4 polls at 15-min interval)
-                polls = context.bot_data.get("hold_polls", 0) + 1
-                context.bot_data["hold_polls"] = polls
-                if polls % 4 == 0:
-                    ticker    = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
-                    price     = float(ticker["last"])
-                    entry     = position["entry_price"]
-                    pnl_pct   = (price - entry) / entry * 100
-                    pnl_usdt  = (price - entry) / entry * position["size_usdt"]
-                    portfolio = await executor.get_total_portfolio(exchange)
-                    sl_price  = entry * (1 + executor.SL_PCT)
-                    tp_price  = entry * (1 + executor.TP_PCT)
-                    await alert(
-                        f"📍 HOLDING BTC/USDT\n"
-                        f"Bought at: ${entry:,.2f} | Now: ${price:,.2f}\n"
-                        f"Profit/Loss: {pnl_pct:+.2f}% (${pnl_usdt:+.4f})\n"
-                        f"Auto-sell target (TP): ${tp_price:,.2f} (+8%)\n"
-                        f"Alert threshold: ${sl_price:,.2f} (-5%)\n"
-                        f"Total portfolio: ${portfolio:.2f}\n"
-                        f"Type /glossary to explain terms"
-                    )
             return
 
         # ── No position: look for entry ───────────────────────────────────
@@ -476,7 +454,6 @@ async def poll_market(context: ContextTypes.DEFAULT_TYPE) -> None:
             await alert("⚠️ Order failed — balance too low.")
             return
 
-        context.bot_data["hold_polls"] = 0
         portfolio = await executor.get_total_portfolio(exchange)
         await alert(reporter.trade_card("BUY", result["price"], result["size_usdt"], reason, portfolio))
 
@@ -520,6 +497,39 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     except Exception as e:
         logger.error("Heartbeat error: %s", e)
+
+
+# ── Daily holding update job (7am NZT) ───────────────────────────────────────
+
+async def daily_holding_update(context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = os.environ["TELEGRAM_ALLOWED_CHAT_ID"]
+    try:
+        position = db.get_open_position()
+        if not position:
+            return
+        exchange  = make_exchange()
+        ticker    = await asyncio.to_thread(exchange.fetch_ticker, PAIR)
+        price     = float(ticker["last"])
+        entry     = position["entry_price"]
+        pnl_pct   = (price - entry) / entry * 100
+        pnl_usdt  = (price - entry) / entry * position["size_usdt"]
+        portfolio = await executor.get_total_portfolio(exchange)
+        sl_price  = entry * (1 + executor.SL_PCT)
+        tp_price  = entry * (1 + executor.TP_PCT)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"📍 HOLDING BTC/USDT\n"
+                f"Bought at: ${entry:,.2f} | Now: ${price:,.2f}\n"
+                f"Profit/Loss: {pnl_pct:+.2f}% (${pnl_usdt:+.4f})\n"
+                f"Auto-sell target (TP): ${tp_price:,.2f} (+8%)\n"
+                f"Alert threshold: ${sl_price:,.2f} (-5%)\n"
+                f"Total portfolio: ${portfolio:.2f}\n"
+                f"Type /glossary to explain terms"
+            ),
+        )
+    except Exception as e:
+        logger.error("Daily holding update error: %s", e)
 
 
 # ── Daily summary job ─────────────────────────────────────────────────────────
@@ -733,10 +743,15 @@ def main() -> None:
     app.add_handler(CommandHandler("log",      cmd_log))
     app.add_handler(CommandHandler("glossary", cmd_glossary))
 
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    _nzt = ZoneInfo("Pacific/Auckland")
+
     app.job_queue.run_repeating(poll_market,           interval=POLL_INTERVAL, first=10)
     app.job_queue.run_repeating(mission_control_update, interval=POLL_INTERVAL, first=20)
     app.job_queue.run_repeating(heartbeat,             interval=21600, first=21600)
-    app.job_queue.run_daily(daily_summary, time=__import__("datetime").time(DAILY_HOUR, DAILY_MIN))
+    app.job_queue.run_daily(daily_summary,        time=_dt.time(DAILY_HOUR, DAILY_MIN))
+    app.job_queue.run_daily(daily_holding_update, time=_dt.time(7, 0, tzinfo=_nzt))
 
     # Graceful shutdown on SIGTERM
     def _sigterm(*_):
